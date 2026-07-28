@@ -14,4 +14,4 @@ permissions:
 
 jobs:
   pr-checks:
-    uses: smplify-mdm/com.smplify.infra/.github/workflows/pr-checks.yml@master
+    uses: smplify-mdm/com.smplify.infra/.github/workflows/pr-checks.yml@297648335519ef29c49b6cd0c4c8783a3bc1e733 # infra master @ 2026-07-28
