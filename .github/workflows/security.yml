@@ -7,7 +7,7 @@ permissions:
   contents: read
 jobs:
   security:
-    uses: smplify-mdm/com.smplify.infra/.github/workflows/security-scan.yml@d46fe708117b12d4619e1b1d46956cf04c3f97d2 # infra master @ 2026-07-29
+    uses: smplify-mdm/com.smplify.infra/.github/workflows/security-scan.yml@5872e5b731472f7bd5ab9f3355c347a982384221 # infra master @ 2026-07-29 (post-hotfix)
     with:
       language: other
       advisory: true          # flipped to false in step 6
