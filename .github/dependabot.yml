@@ -1,0 +1,24 @@
+# Keeps GitHub Actions references current.
+#
+# This is a prerequisite for SHA-pinning the reusable workflows this repository
+# calls. A pin with nothing to bump it rots: either CI silently freezes on an
+# old workflow, or someone repoints to @master to unblock themselves. Both are
+# worse than not pinning at all, which is why Dependabot comes first and the
+# pinning follows.
+#
+# All action updates are grouped into a single weekly pull request to keep the
+# review load to roughly one PR per week rather than one per action.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci

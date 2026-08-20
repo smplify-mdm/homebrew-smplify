@@ -1,0 +1,16 @@
+name: PR Checks
+
+# PR-title convention + size/area auto-labelling via a shared reusable workflow.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+# Reusable workflow labels the PR; org default token is read-only.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  pr-checks:
+    uses: smplify-mdm/com.smplify.infra/.github/workflows/pr-checks.yml@297648335519ef29c49b6cd0c4c8783a3bc1e733 # infra master @ 2026-07-28

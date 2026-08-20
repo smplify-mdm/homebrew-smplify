@@ -1,0 +1,110 @@
+title = "smplify gitleaks config (homebrew-smplify)"
+
+# Repository-local gitleaks configuration.
+#
+# This repository ships its own config rather than inheriting an organisation
+# default, and the scan is inlined in .github/workflows/secrets.yml rather than
+# called as a reusable workflow. Keep this file in step with the organisation
+# default when that changes.
+#
+# The rules below extend the upstream default ruleset with keyword-anchored
+# rules for credential field names that no provider registers with GitHub, so
+# the default rules cannot recognise them. They are anchored on the assignment
+# rather than the shape of the value, and the allowlist below restores the
+# precision that trade-off costs.
+
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Additional rules
+# ---------------------------------------------------------------------------
+
+[[rules]]
+id = "smplify-jwt-secret"
+description = "Hard-coded JWT signing secret"
+regex = '''(?i)(jwt[_-]?secret|jwtsigningkey)["'\s]*[:=]\s*["']?([A-Za-z0-9+/=_\-]{16,})["']?'''
+secretGroup = 2
+keywords = ["jwt_secret", "jwtsecret", "jwtSigningKey"]
+
+[[rules]]
+id = "smplify-internal-health-secret"
+description = "Shared secret assigned to an internal health-check header"
+regex = '''(?i)internal[_-]?health[_-]?secret["'\s]*[:=]\s*["']?([A-Za-z0-9+/=_\-]{12,})["']?'''
+secretGroup = 1
+keywords = ["internal-health-secret", "internal_health_secret", "internalHealthSecret"]
+
+[[rules]]
+id = "smplify-signature-key"
+description = "HMAC key backing a request-signature header"
+regex = '''(?i)(smplify[_-]?signature[_-]?(key|secret))["'\s]*[:=]\s*["']?([A-Za-z0-9+/=_\-]{16,})["']?'''
+secretGroup = 3
+keywords = ["smplify-signature", "smplify_signature"]
+
+[[rules]]
+id = "smplify-api-key"
+description = "Value assigned to an X-API-Key / apiKey field"
+regex = '''(?i)(x-api-key|api[_-]?key)["'\s]*[:=]\s*["']([A-Za-z0-9+/=_\-]{20,})["']'''
+secretGroup = 2
+keywords = ["x-api-key", "api_key", "apikey"]
+
+[[rules]]
+id = "smplify-device-token"
+description = "Device enrolment / APNs device token committed to source"
+regex = '''(?i)device[_-]?token["'\s]*[:=]\s*["']([A-Fa-f0-9]{64,}|[A-Za-z0-9+/=_\-]{32,})["']'''
+secretGroup = 1
+keywords = ["devicetoken", "device_token"]
+
+# ---------------------------------------------------------------------------
+# Allowlist
+# ---------------------------------------------------------------------------
+
+[allowlist]
+description = """
+Paths and values that are structurally secret-shaped but cannot be
+credentials. Everything here is a machine-generated digest, a lockfile, or an
+explicit placeholder. Note what is deliberately NOT allowlisted: test files
+and fixtures. A real credential pasted into a test is still leaked, and
+'it's only a test' is how most of them get in.
+"""
+
+paths = [
+  # Dependency lockfiles: full of base64 integrity digests that trip the
+  # generic high-entropy rules.
+  '''(^|/)go\.sum$''',
+  '''(^|/)package-lock\.json$''',
+  '''(^|/)yarn\.lock$''',
+  '''(^|/)pnpm-lock\.yaml$''',
+  '''(^|/)Cargo\.lock$''',
+  '''(^|/)poetry\.lock$''',
+  # Vulnerability tooling state: CVE ids and content hashes.
+  '''(^|/)\.vulnbaseline\.json$''',
+  '''(^|/)\.vulnignore\.yaml$''',
+  # Public key material is public by definition.
+  '''\.pub$''',
+  '''(^|/)known_hosts$''',
+]
+
+regexes = [
+  # Explicit placeholders. Anchored on the whole value so that a real secret
+  # merely containing the word "example" is not waved through.
+  '''^(CHANGEME|CHANGE_ME|REPLACE_ME|TODO|TBD)$''',
+  '''^x{8,}$''',
+  '''^X{8,}$''',
+  '''^0{8,}$''',
+  '''^(REDACTED|redacted|<REDACTED>)$''',
+  '''^\$\{[A-Za-z0-9_]+\}$''',        # ${ENV_VAR} indirection
+  '''^\$\{[A-Za-z0-9_]+:-[^}]*\}$''', # ${ENV_VAR:-default} shell expansion
+  '''^\$\(.*\)$''',                    # $(command substitution)
+  '''^\{\{[^}]+\}\}$''',              # {{ helm / mustache placeholder }}
+  '''^(dummy|sample|placeholder|your[_-].*|my[_-]secret)$''',
+
+  # Self-declaring placeholders: values whose whole content states that they
+  # are not credentials. Matched on the marker anywhere in the value rather
+  # than anchored, because the marker is a phrase nobody puts in a real
+  # credential while the value it decorates varies.
+  '''(?i)(change[-_]?me|change[-_]?it|replace[-_]?me|replace[-_]?with)''',
+  '''(?i)not[-_]?a[-_]?real[-_]?(credential|secret|key|token)''',
+  '''(?i)(for[-_]local[-_]dev|local[-_]dev[-_]only|do[-_]not[-_]use[-_]in[-_]prod)''',
+  '''(?i)^(insecure|unsafe|fake|stub)[-_]''',
+]
