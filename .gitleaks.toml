@@ -108,3 +108,5 @@ regexes = [
   '''(?i)(for[-_]local[-_]dev|local[-_]dev[-_]only|do[-_]not[-_]use[-_]in[-_]prod)''',
   '''(?i)^(insecure|unsafe|fake|stub)[-_]''',
 ]
+
+# SMP-1362 verification touch -- this PR will be closed unmerged.
