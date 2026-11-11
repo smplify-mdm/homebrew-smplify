@@ -1,16 +1,77 @@
 name: PR Checks
 
-# PR-title convention + size/area auto-labelling via a shared reusable workflow.
-
+# SMP-1369: a public repository cannot invoke our internal reusable workflow.
+# This local check applies the same title convention without requiring secrets.
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
-# Reusable workflow labels the PR; org default token is read-only.
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
-  pr-checks:
-    uses: smplify-mdm/com.smplify.infra/.github/workflows/pr-checks.yml@297648335519ef29c49b6cd0c4c8783a3bc1e733 # infra master @ 2026-07-28
+  title:
+    name: PR title
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Conventional PR title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: bash scripts/pr-title.sh
+  tests:
+    name: PR and secret-scan contracts
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+  triage:
+    name: Size and area labels
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Apply advisory labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          files=$(mktemp)
+          trap 'rm -f "$files"' EXIT
+          gh api "repos/$REPO/pulls/$PR/files" --paginate \
+            --jq '.[] | [.filename, (.additions + .deletions | tostring)] | @tsv' > "$files"
+          total=0
+          declare -A areas=()
+          while IFS=$'\t' read -r file churn; do
+            case "$file" in
+              *package-lock.json|*go.sum|*.lock|vendor/*|*/generated/*|dist/*|*.min.*) ;;
+              *) total=$((total + churn)) ;;
+            esac
+            case "$file" in .github/workflows/*) areas[area/ci]=1 ;; esac
+            case "$file" in *.tf|*terraform/*) areas[area/infra]=1 ;; esac
+            case "$file" in *auth*|*rbac*|*crypto*|*security*|*/ca/*) areas[area/security]=1 ;; esac
+            case "$file" in *openapi*|*api-docs/*|*SmplifyAPIsDoc/*) areas[area/api]=1 ;; esac
+          done < "$files"
+          if ((total < 50)); then size='size/XS'
+          elif ((total < 200)); then size='size/S'
+          elif ((total < 500)); then size='size/M'
+          elif ((total <= 800)); then size='size/L'
+          else size='size/XL'; fi
+          labels="$size"
+          for area in "${!areas[@]}"; do labels="$labels,$area"; done
+          gh pr edit "$PR" --repo "$REPO" --add-label "$labels" \
+            || echo '::warning::could not apply labels (read-only token or missing labels)'
+          for previous in size/XS size/S size/M size/L size/XL; do
+            [[ "$previous" == "$size" ]] || gh pr edit "$PR" --repo "$REPO" --remove-label "$previous" >/dev/null 2>&1 || true
+          done
+          if ((total > 800)); then
+            echo '::warning::Large PR; add a breakdown, testing notes and reviewer guidance.'
+          fi
