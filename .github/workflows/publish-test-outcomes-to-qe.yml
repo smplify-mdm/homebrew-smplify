@@ -1,0 +1,134 @@
+name: QE CI reporting
+
+on:
+  workflow_run:
+    workflows: [PR Checks]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  publish:
+    if: >-
+      vars.QE_DASHBOARD_PUBLISH == 'true' &&
+      github.event_name == 'workflow_run' &&
+      github.repository_owner == 'smplify-mdm' &&
+      github.event.workflow_run.head_repository.id == github.event.repository.id &&
+      (github.event.workflow_run.event == 'pull_request' ||
+       (github.event.workflow_run.head_branch == github.event.repository.default_branch &&
+        contains(fromJSON('["push","schedule","workflow_dispatch","repository_dispatch"]'), github.event.workflow_run.event)))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    permissions:
+      actions: read
+      id-token: write
+    env:
+      QE_ACCOUNT: ${{ secrets.QE_DASHBOARD_AWS_ACCOUNT_ID }}
+      QE_BUCKET: ${{ secrets.QE_DASHBOARD_BUCKET }}
+      AWS_REGION: us-east-1
+      AWS_MAX_ATTEMPTS: '3'
+    steps:
+      - name: Render sanitized GitHub test workflow outcomes
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          QE_CATALOG_REVISION: 4c6f5322a328958d7f57f7779ba6166b493f3022af06c45f31b8f05b228334e9
+        with:
+          script: |
+            const { writeFileSync } = require('node:fs');
+            const source = context.payload.workflow_run;
+            const repository = context.payload.repository;
+            const id = `gh-${repository.id}-${source.id}-${source.run_attempt}`;
+            if (![repository.id, source.id, source.run_attempt].every(n => Number.isSafeInteger(n) && n > 0)
+                || !/^[a-f0-9]{40}$/.test(source.head_sha)
+                || !/^[A-Za-z0-9._/-]{1,200}$/.test(source.head_branch || '')
+                || !Number.isFinite(Date.parse(source.run_started_at))
+                || !Number.isFinite(Date.parse(source.updated_at))
+                || Date.parse(source.updated_at) < Date.parse(source.run_started_at)) {
+              throw new Error('Invalid GitHub run provenance');
+            }
+            const request = { ...context.repo, run_id: source.id, attempt_number: source.run_attempt, per_page: 100 };
+            const jobs = [];
+            let truncated = false;
+            for await (const { data } of github.paginate.iterator(github.rest.actions.listJobsForWorkflowRunAttempt, request)) {
+              if (jobs.length >= 500) { truncated = true; break; }
+              jobs.push(...data);
+            }
+            const labels = new Set(['success','failure','neutral','cancelled','skipped','timed_out','action_required','stale','startup_failure']);
+            const outcome = value => labels.has(value) ? value : 'unknown';
+            const escape = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+            const label = value => {
+              const text = String(value || '').replace(/[\x00-\x1f\x7f]/g, ' ').trim();
+              const sensitive = /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bbearer\s+(?!credentials\b)[A-Za-z0-9_+/.=-]{6,}|(?:password|token|secret|api[_-]?key)\s*[:=]\s*\S+/i;
+              return escape(!text || sensitive.test(text) ? '[withheld]' : text.slice(0, 200));
+            };
+            const limitedSteps = jobs.some(job => (job.steps || []).length > 100);
+            const rows = jobs.flatMap(job => [
+              `<tr><th scope="row">${label(job.name)}</th><td>${outcome(job.conclusion)}</td></tr>`,
+              ...(job.steps || []).slice(0, 100).map(step =>
+                `<tr><td class="step">${label(step.name)}</td><td>${outcome(step.conclusion)}</td></tr>`),
+            ]).join('');
+            const buildUrl = `https://github.com/${repository.full_name}/actions/runs/${source.id}/attempts/${source.run_attempt}`;
+            const report = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+              <title>GitHub test workflow outcomes</title><style>body{font:15px system-ui;margin:24px;max-width:1000px}table{border-collapse:collapse}
+              th,td{text-align:left;border:1px solid #999;padding:6px 10px}.step{padding-left:24px}</style>
+              <h1>${label(source.name)}</h1><p><a href="${escape(buildUrl)}">GitHub Actions run and retained artifacts</a></p>
+              <p>Attempt ${source.run_attempt} · ${source.event === 'pull_request' ? 'Pull request' : 'Default branch'} · ${outcome(source.conclusion)}</p>
+              <p>GitHub job and step outcomes only. Test-case assertions, runner logs and raw artifacts are excluded.</p>
+              ${truncated || limitedSteps ? '<p>Report limited to 500 jobs and 100 steps per job.</p>' : ''}
+              ${jobs.length ? '' : '<p>GitHub returned no jobs for this attempt.</p>'}
+              <table><thead><tr><th scope="col">Job or step</th><th scope="col">Outcome</th></tr></thead><tbody>${rows}</tbody></table></html>`;
+            const manifest = {
+              version: 1, project: 'smplify-qe', id, invocationId: id, suite: `github-workflow-${source.workflow_id}`,
+              source: { repository: repository.full_name, revision: source.head_sha, branch: source.head_branch },
+              backendRevision: null, catalogRevision: process.env.QE_CATALOG_REVISION,
+              startedAt: new Date(source.run_started_at).toISOString(), finishedAt: new Date(source.updated_at).toISOString(),
+              environment: source.event === 'pull_request' ? 'ci-pr' : 'ci',
+              runner: { id: 'github-actions', name: 'GitHub Actions', source: 'other-ci', os: 'See source workflow', architecture: 'See source workflow', buildUrl },
+              executionStatus: source.conclusion === 'failure' ? 'failed'
+                : source.conclusion === 'success' && jobs.length && !truncated && !limitedSteps ? 'completed' : 'aborted',
+              shards: 1, cases: [], coverage: [], report: 'html/index.html',
+            };
+            writeFileSync('qe-ci-report.html', report, { flag: 'wx' });
+            writeFileSync('qe-ci-manifest.json', JSON.stringify(manifest), { flag: 'wx' });
+            core.exportVariable('QE_EXECUTION_ID', id);
+      - uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::${{ env.QE_ACCOUNT }}:role/qe-dashboard-smplify-qe-github-repo-${{ github.repository_id }}
+          role-session-name: qe-${{ github.run_id }}-${{ github.run_attempt }}
+          role-duration-seconds: 900
+          allowed-account-ids: ${{ env.QE_ACCOUNT }}
+      - name: Publish the report and manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$QE_EXECUTION_ID" =~ ^gh-[0-9]+-[0-9]+-[0-9]+$ ]]
+          prefix="reports/smplify-qe/$QE_EXECUTION_ID"
+          put() {
+            local file=$1 key=$2 type=$3 checksum version
+            checksum=$(openssl dgst -sha256 -binary "$file" | openssl base64 -A)
+            if ! version=$(aws s3api put-object --bucket "$QE_BUCKET" --key "$key" \
+              --expected-bucket-owner "$QE_ACCOUNT" --body "$file" --content-type "$type" \
+              --checksum-sha256 "$checksum" --if-none-match '*' --server-side-encryption AES256 \
+              --query VersionId --output text 2>qe-s3-error.txt); then
+              if ! grep -q 'PreconditionFailed' qe-s3-error.txt; then
+                cat qe-s3-error.txt >&2
+                return 1
+              fi
+              version=$(aws s3api head-object --bucket "$QE_BUCKET" --key "$key" \
+                --expected-bucket-owner "$QE_ACCOUNT" --checksum-mode ENABLED \
+                | jq -er --arg sum "$checksum" 'select(.ChecksumSHA256 == $sum) | .VersionId')
+            fi
+            [[ -n "$version" && "$version" != None && "$version" != null ]] || return 1
+            printf '%s\n' "$version"
+          }
+          version=$(put qe-ci-report.html "$prefix/html/index.html" 'text/html; charset=utf-8')
+          sha=$(sha256sum qe-ci-report.html | cut -d ' ' -f 1)
+          size=$(wc -c < qe-ci-report.html)
+          cat > qe-artifacts.jq <<'JQ'
+          .artifacts = [{path: .report, size: $size, sha256: $sha, versionId: $version}]
+          JQ
+          jq -c --arg version "$version" --arg sha "$sha" --argjson size "$size" \
+            -f qe-artifacts.jq qe-ci-manifest.json > qe-ci-upload.json
+          put qe-ci-upload.json "$prefix/manifest.json" 'application/json' >/dev/null
+          printf 'QE Dashboard execution: %s\n' "$QE_EXECUTION_ID" >> "$GITHUB_STEP_SUMMARY"
